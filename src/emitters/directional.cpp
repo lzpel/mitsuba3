@@ -118,6 +118,7 @@ public:
             dr::make_opaque(m_direction);
             dr::make_opaque(m_to_world);
         } else if (trafo_changed) {
+            m_to_world = m_to_world.value().update(); // a write from Python only touches the device part
             m_direction = ScalarVector3f(dr::normalize(
                 m_to_world.scalar() * ScalarVector3f(0.f, 0.f, 1.f)));
             dr::make_opaque(m_direction);
