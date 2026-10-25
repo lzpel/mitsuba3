@@ -26,7 +26,7 @@ Point light source (:monosp:`point`)
    - Alternative parameter for specifying the light source position.
      Note that only one of the parameters :monosp:`to_world` and
      :monosp:`position` can be used at a time.
-   - |exposed|
+   - |exposed|, |differentiable|, |discontinuous|
 
  * - to_world
    - |transform|
@@ -86,7 +86,11 @@ public:
 
     void traverse(TraversalCallback *cb) override {
         Base::traverse(cb);
-        cb->put("position",  m_position,  ParamFlags::NonDifferentiable);
+        /* The position enters `sample_direction()` through the direction
+           (cosine / BSDF term) and the 1/r^2 falloff, both of which are
+           smooth, so plain AD yields their derivative. Only the visibility
+           (shadow boundary) term is discontinuous, hence the flag. */
+        cb->put("position",  m_position,  ParamFlags::Differentiable | ParamFlags::Discontinuous);
         cb->put("intensity", m_intensity, ParamFlags::Differentiable);
     }
 

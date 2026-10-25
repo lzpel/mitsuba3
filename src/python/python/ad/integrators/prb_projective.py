@@ -244,8 +244,9 @@ class PathProjectiveIntegrator(PSIntegrator):
             active_em = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
 
             # If so, randomly sample an emitter without derivative tracking.
+            em_sample = sampler.next_2d()
             ds, em_weight = scene.sample_emitter_direction(
-                si, sampler.next_2d(), True, active_em)
+                si, em_sample, True, active_em)
             active_em &= (ds.pdf != 0.0)
 
             with dr.resume_grad(when=not primal):
@@ -268,6 +269,16 @@ class PathProjectiveIntegrator(PSIntegrator):
                     ds_diff = dr.select(textured_area_em, ds_diff, dr.zeros(mi.DirectionSample3f))
                     ds_diff.d = dr.select(textured_area_em, ds_diff.d, dr.normalize(ds.p - si.p))
                     ds_diff.d = dr.select(~is_infinite, ds_diff.d, ds.d)
+
+                    # Delta emitters (point, spot, directional) carry no derivative
+                    # w.r.t. their own position/direction in the detached sample.
+                    # Re-sample them with AD attached so that `ds.p` (1/r^2 via
+                    # eval_direction) and `ds.d` (cosine / BSDF) carry those gradients.
+                    is_delta = mi.has_flag(ds.emitter.flags(), mi.EmitterFlags.DeltaPosition) | \
+                               mi.has_flag(ds.emitter.flags(), mi.EmitterFlags.DeltaDirection)
+                    delta_em = active_em & is_delta
+                    ds_delta, _ = ds.emitter.sample_direction(si, em_sample, delta_em)
+                    ds_diff = dr.select(delta_em, ds_delta, ds_diff)
                     ds = dr.replace_grad(ds, ds_diff)
 
                     # If the current interaction point is moving, we need

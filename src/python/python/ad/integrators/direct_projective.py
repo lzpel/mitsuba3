@@ -164,8 +164,9 @@ class DirectProjectiveIntegrator(PSIntegrator):
         active_em_ = active_next & mi.has_flag(bsdf.flags(), mi.BSDFFlags.Smooth)
 
         # If so, pick an emitter and sample a detached emitter direction
+        em_sample = sampler.next_2d(active_em_)
         ds_em, emitter_val = scene.sample_emitter_direction(
-            si, sampler.next_2d(active_em_), test_visibility=True, active=active_em_)
+            si, em_sample, test_visibility=True, active=active_em_)
         active_em = active_em_ & (ds_em.pdf != 0.0)
 
         with dr.resume_grad(when=not primal):
@@ -190,6 +191,16 @@ class DirectProjectiveIntegrator(PSIntegrator):
                 ds_em_diff = dr.select(textured_area_em, ds_em_diff, dr.zeros(mi.DirectionSample3f))
                 ds_em_diff.d = dr.select(textured_area_em, ds_em_diff.d, dr.normalize(ds_em.p - si.p))
                 ds_em_diff.d = dr.select(~is_infinite, ds_em_diff.d, ds_em.d)
+
+                # Delta emitters (point, spot, directional) carry no derivative
+                # w.r.t. their own position/direction in the detached sample.
+                # Re-sample them with AD attached so that `ds_em.p` (1/r^2 via
+                # eval_direction) and `ds_em.d` (cosine / BSDF) carry those gradients.
+                is_delta = mi.has_flag(ds_em.emitter.flags(), mi.EmitterFlags.DeltaPosition) | \
+                           mi.has_flag(ds_em.emitter.flags(), mi.EmitterFlags.DeltaDirection)
+                delta_em = active_em & is_delta
+                ds_em_delta, _ = ds_em.emitter.sample_direction(si, em_sample, delta_em)
+                ds_em_diff = dr.select(delta_em, ds_em_delta, ds_em_diff)
                 ds_em = dr.replace_grad(ds_em, ds_em_diff)
 
                 # to differentiate the solid angle to surface area

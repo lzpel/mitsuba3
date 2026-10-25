@@ -31,7 +31,11 @@ Distant directional emitter (:monosp:`directional`)
  * - direction
    - |vector|
    - Alternative (and exclusive) to `to_world`. Direction towards which the
-     emitter is radiating in world coordinates.
+     emitter is radiating in world coordinates. The vector does not need to
+     be normalized; it is normalized internally so that an optimizer can
+     update it freely. When `direction` is changed, `to_world` is rebuilt
+     from it (and vice versa).
+   - |exposed|, |differentiable|, |discontinuous|
 
 This emitter plugin implements a distant directional source which radiates a
 specified power per unit area along a fixed direction. By default, the emitter
@@ -72,10 +76,13 @@ public:
                 Throw("Only one of the parameters 'direction' and 'to_world' "
                       "can be specified at the same time!'");
 
-            ScalarVector3f direction(dr::normalize(props.get<ScalarVector3f>("direction")));
-            auto [up, unused] = coordinate_system(direction);
-
-            m_to_world = ScalarAffineTransform4f::look_at(0.0f, ScalarPoint3f(direction), up);
+            m_direction = ScalarVector3f(dr::normalize(props.get<ScalarVector3f>("direction")));
+            update_to_world();
+        } else {
+            // Keep the user-supplied `to_world` as is and derive the direction from it
+            m_direction = ScalarVector3f(dr::normalize(
+                m_to_world.scalar() * ScalarVector3f(0.f, 0.f, 1.f)));
+            dr::make_opaque(m_direction);
             dr::make_opaque(m_to_world);
         }
 
@@ -92,7 +99,31 @@ public:
     void traverse(TraversalCallback *cb) override {
         Base::traverse(cb);
         cb->put("irradiance",  m_irradiance,  ParamFlags::Differentiable);
+        /* The direction enters `sample_direction()` only through the cosine /
+           BSDF term, which is smooth, so plain AD yields its derivative. The
+           visibility (shadow boundary) term is discontinuous, hence the flag.
+           `to_world` is kept for compatibility and is derived from `direction`. */
+        cb->put("direction",   m_direction,   ParamFlags::Differentiable | ParamFlags::Discontinuous);
         cb->put("to_world",    m_to_world,    ParamFlags::NonDifferentiable);
+    }
+
+    void parameters_changed(const std::vector<std::string> &keys) override {
+        bool dir_changed = string::contains(keys, "direction");
+        bool trafo_changed = string::contains(keys, "to_world");
+        if (dir_changed) {
+            m_direction = m_direction.value(); // update scalar part as well
+            update_to_world();
+        } else if (keys.empty()) {
+            m_direction = m_direction.value();
+            dr::make_opaque(m_direction);
+            dr::make_opaque(m_to_world);
+        } else if (trafo_changed) {
+            m_direction = ScalarVector3f(dr::normalize(
+                m_to_world.scalar() * ScalarVector3f(0.f, 0.f, 1.f)));
+            dr::make_opaque(m_direction);
+            dr::make_opaque(m_to_world);
+        }
+        Base::parameters_changed(keys);
     }
 
     void set_scene(const Scene *scene) override {
@@ -122,11 +153,10 @@ public:
         Point2f offset =  warp::square_to_uniform_disk_concentric(spatial_sample);
 
         // 2. "Sample" directional component (fixed, no actual sampling required)
-        const auto trafo = m_to_world.value();
-        Vector3f d_global = trafo * Vector3f{ 0.f, 0.f, 1.f };
+        Vector3f d_global = direction();
 
-        Vector3f perp_offset =
-            trafo * Vector3f{ offset.x(), offset.y(), 0.f };
+        Frame3f frame(d_global);
+        Vector3f perp_offset = frame.s * offset.x() + frame.t * offset.y();
         Point3f origin = m_bsphere.center + (perp_offset - d_global) * m_bsphere.radius;
 
         // 3. Sample spectral component
@@ -150,7 +180,7 @@ public:
                      Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointSampleDirection, active);
 
-        Vector3f d = m_to_world.value() * Vector3f{ 0.f, 0.f, 1.f };
+        Vector3f d = direction();
         // Needed when the reference point is on the sensor, which is not part of the bbox
         Float radius = dr::maximum(m_bsphere.radius, dr::norm(it.p - m_bsphere.center));
         Float dist = 2.f * radius;
@@ -221,6 +251,7 @@ public:
         oss << "DirectionalEmitter[" << std::endl
             << "  irradiance = " << string::indent(m_irradiance) << ","
             << std::endl
+            << "  direction = " << string::indent(m_direction) << "," << std::endl
             << "  bsphere = " << string::indent(m_bsphere) << "," << std::endl
             << "]";
         return oss.str();
@@ -229,10 +260,23 @@ public:
     MI_DECLARE_CLASS(DirectionalEmitter)
 
 protected:
+    /// Normalized (differentiable) direction in which the emitter radiates
+    Vector3f direction() const { return dr::normalize(m_direction.value()); }
+
+    /// Rebuild `m_to_world` from the scalar direction (used for `to_world` compatibility)
+    void update_to_world() {
+        ScalarVector3f d = dr::normalize(m_direction.scalar());
+        auto [up, unused] = coordinate_system(d);
+        m_to_world = ScalarAffineTransform4f::look_at(0.0f, ScalarPoint3f(d), up);
+        dr::make_opaque(m_direction);
+        dr::make_opaque(m_to_world);
+    }
+
     ref<Texture> m_irradiance;
+    field<Vector3f, ScalarVector3f> m_direction;
     ScalarBoundingSphere3f m_bsphere;
 
-    MI_TRAVERSE_CB(Base, m_irradiance)
+    MI_TRAVERSE_CB(Base, m_irradiance, m_direction)
 };
 
 MI_EXPORT_PLUGIN(DirectionalEmitter)
