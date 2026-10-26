@@ -25,7 +25,11 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, windows-latest, macos-26]
-        python: [cp310, cp311, cp312_stable]
+        # Version-specific wheels are required wherever PyPI ships a
+        # version-specific drjit wheel (installers prefer it over abi3, and an
+        # abi3 Mitsuba wheel crashes against it). The stable ABI wheel covers
+        # newer Python versions.
+        python: [cp310, cp311, cp312, cp313, cp314, cp312_stable]
       fail-fast: false
 
     name: >
